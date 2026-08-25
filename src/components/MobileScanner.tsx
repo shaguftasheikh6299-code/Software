@@ -1,27 +1,75 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { connectSession, disconnectSession, sendScanEvent } from '../lib/scannerSession';
+import { useScanner } from '../lib/useScanner';
 import { ScanLine, Check, X, Camera, CameraOff, Wifi, ArrowLeft, AlertTriangle, Loader2, Keyboard } from 'lucide-react';
-
-const READER_ID = 'mobile-reader';
 
 interface Props {
   sessionId: string;
 }
 
 export default function MobileScanner({ sessionId }: Props) {
-  const [scanning, setScanning] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [recentScans, setRecentScans] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(true);
   const [manualInput, setManualInput] = useState('');
   const [mounted, setMounted] = useState(false);
-  const scannerRef = useRef<any>(null);
-  const initializedRef = useRef(false);
-  const lastScanRef = useRef<{ code: string; time: number }>({ code: '', time: 0 });
   const manualInputRef = useRef<HTMLInputElement>(null);
+  const lastScanRef = useRef<{ code: string; time: number }>({ code: '', time: 0 });
+
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  const handleScanResult = useCallback(
+    async (decodedText: string) => {
+      const code = decodedText.trim();
+      if (!code) return;
+
+      const now = Date.now();
+      if (code === lastScanRef.current.code && now - lastScanRef.current.time < 2000) {
+        return;
+      }
+      lastScanRef.current = { code, time: now };
+
+      // Haptic feedback
+      if (navigator.vibrate) {
+        try { navigator.vibrate(200); } catch { /* ignore */ }
+      }
+      // Audio beep
+      try {
+        const beepCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const osc = beepCtx.createOscillator();
+        const gain = beepCtx.createGain();
+        osc.connect(gain);
+        gain.connect(beepCtx.destination);
+        osc.frequency.value = 880;
+        osc.type = 'sine';
+        gain.gain.setValueAtTime(0.3, beepCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, beepCtx.currentTime + 0.2);
+        osc.start();
+        osc.stop(beepCtx.currentTime + 0.2);
+      } catch {
+        // audio not critical
+      }
+
+      // Send to desktop
+      try {
+        await sendScanEvent(sessionIdRef.current, code);
+        setRecentScans((prev) => [code, ...prev].slice(0, 5));
+      } catch {
+        setRecentScans((prev) => [code, ...prev].slice(0, 5));
+      }
+    },
+    []
+  );
+
+  const { scanning, cameraError, startCamera, stopCamera, scannerContainerRef } = useScanner(handleScanResult, {
+    qrboxWidth: 250,
+    qrboxHeight: 180,
+  });
 
   // Mark component as mounted so we know the DOM is ready
   useEffect(() => {
@@ -65,138 +113,7 @@ export default function MobileScanner({ sessionId }: Props) {
     };
   }, [sessionId]);
 
-  const stopCamera = useCallback(async () => {
-    if (!scannerRef.current) {
-      setScanning(false);
-      return;
-    }
-    const instance = scannerRef.current;
-    scannerRef.current = null;
-    setScanning(false);
-    try {
-      const state = instance.getState();
-      if (state === 2) {
-        await instance.stop();
-      }
-      instance.clear();
-    } catch {
-      try {
-        instance.clear();
-      } catch {
-        // ignore
-      }
-    }
-  }, []);
-
-  const handleScanResult = useCallback(
-    async (decodedText: string) => {
-      const code = decodedText.trim();
-      if (!code) return;
-
-      const now = Date.now();
-      if (code === lastScanRef.current.code && now - lastScanRef.current.time < 2000) {
-        return;
-      }
-      lastScanRef.current = { code, time: now };
-
-      // Haptic feedback
-      if (navigator.vibrate) {
-        try { navigator.vibrate(200); } catch { /* ignore */ }
-      }
-      // Audio beep
-      try {
-        const beepCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const osc = beepCtx.createOscillator();
-        const gain = beepCtx.createGain();
-        osc.connect(gain);
-        gain.connect(beepCtx.destination);
-        osc.frequency.value = 880;
-        osc.type = 'sine';
-        gain.gain.setValueAtTime(0.3, beepCtx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, beepCtx.currentTime + 0.2);
-        osc.start();
-        osc.stop(beepCtx.currentTime + 0.2);
-      } catch {
-        // audio not critical
-      }
-
-      // Send to desktop
-      try {
-        await sendScanEvent(sessionId, code);
-        setRecentScans((prev) => [code, ...prev].slice(0, 5));
-      } catch {
-        // Still show in recent even if send fails
-        setRecentScans((prev) => [code, ...prev].slice(0, 5));
-      }
-    },
-    [sessionId]
-  );
-
-  // Camera start — only called after mount, fully wrapped in try/catch
-  const startCamera = useCallback(async () => {
-    if (!mounted) return;
-    await stopCamera();
-    setCameraError(null);
-
-    const el = document.getElementById(READER_ID);
-    if (!el) {
-      setCameraError('Scanner container not ready yet. Tap "Start Camera" to retry.');
-      return;
-    }
-    if (initializedRef.current) return;
-
-    // Dynamically import html5-qrcode so a load failure doesn't crash the page
-    let Html5QrcodeModule: any;
-    try {
-      Html5QrcodeModule = await import('html5-qrcode');
-    } catch {
-      setCameraError('Scanner library failed to load. You can still type barcodes manually below.');
-      return;
-    }
-
-    const Html5Qrcode = Html5QrcodeModule.Html5Qrcode || Html5QrcodeModule.default;
-    if (!Html5Qrcode) {
-      setCameraError('Scanner library unavailable. Use manual input below.');
-      return;
-    }
-
-    try {
-      const html5Qrcode = new Html5Qrcode(READER_ID, { verbose: false });
-      scannerRef.current = html5Qrcode;
-      initializedRef.current = true;
-
-      const config = {
-        fps: 10,
-        qrbox: { width: 250, height: 180 },
-        aspectRatio: 1.4,
-      };
-
-      try {
-        await html5Qrcode.start(
-          { facingMode: { ideal: 'environment' } },
-          config,
-          (decodedText: string) => { void handleScanResult(decodedText); },
-          () => {}
-        );
-      } catch {
-        // Fallback to user-facing camera
-        await html5Qrcode.start(
-          { facingMode: { ideal: 'user' } },
-          config,
-          (decodedText: string) => { void handleScanResult(decodedText); },
-          () => {}
-        );
-      }
-      setScanning(true);
-    } catch {
-      initializedRef.current = false;
-      scannerRef.current = null;
-      setScanning(false);
-      setCameraError('Camera permission denied or camera not found. You can still type barcodes manually below.');
-    }
-  }, [handleScanResult, stopCamera, mounted]);
-
-  // Auto-start camera after mount with a small delay to ensure DOM is ready
+  // Auto-start camera after mount with a delay to ensure DOM is ready
   useEffect(() => {
     if (!mounted) return;
     const timer = setTimeout(() => {
@@ -204,22 +121,6 @@ export default function MobileScanner({ sessionId }: Props) {
     }, 800);
     return () => clearTimeout(timer);
   }, [startCamera, mounted]);
-
-  // Cleanup camera on unmount
-  useEffect(() => {
-    return () => {
-      if (scannerRef.current) {
-        const instance = scannerRef.current;
-        scannerRef.current = null;
-        instance
-          .stop()
-          .then(() => instance.clear())
-          .catch(() => {
-            try { instance.clear(); } catch { /* ignore */ }
-          });
-      }
-    };
-  }, []);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -307,29 +208,29 @@ export default function MobileScanner({ sessionId }: Props) {
         </form>
       </div>
 
-      {/* Camera area */}
+      {/* Camera area — isolated container, React renders NO children inside */}
       <div className="flex-1 flex flex-col items-center justify-center p-4">
         <div
-          id={READER_ID}
+          ref={scannerContainerRef}
           style={{ width: '100%', maxWidth: '400px', height: '300px', minHeight: '300px' }}
           className="rounded-xl overflow-hidden bg-black flex items-center justify-center border border-slate-700"
-        >
-          {!scanning && !cameraError && (
-            <div className="text-center text-slate-500">
-              {mounted ? (
-                <>
-                  <Loader2 size={36} className="mx-auto mb-2 animate-spin text-emerald-500" />
-                  <p className="text-sm">Starting camera…</p>
-                </>
-              ) : (
-                <>
-                  <ScanLine size={48} className="mx-auto mb-2 opacity-50" />
-                  <p className="text-sm">Loading scanner…</p>
-                </>
-              )}
-            </div>
-          )}
-        </div>
+        />
+
+        {!scanning && !cameraError && (
+          <div className="mt-4 text-center text-slate-500">
+            {mounted ? (
+              <>
+                <Loader2 size={28} className="mx-auto mb-2 animate-spin text-emerald-500" />
+                <p className="text-sm">Starting camera…</p>
+              </>
+            ) : (
+              <>
+                <ScanLine size={36} className="mx-auto mb-2 opacity-50" />
+                <p className="text-sm">Loading scanner…</p>
+              </>
+            )}
+          </div>
+        )}
 
         {cameraError && (
           <div className="mt-4 w-full max-w-sm p-3 bg-amber-900/50 border border-amber-600 rounded-lg text-sm text-amber-200 flex items-start gap-2">

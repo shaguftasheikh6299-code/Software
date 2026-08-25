@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
 import { QRCodeCanvas } from 'qrcode.react';
 import type { Product } from '../types';
 import { supabase } from '../lib/supabase';
+import { useScanner } from '../lib/useScanner';
 import { generateSessionId, createSession, deleteSession, markScanReceived, deleteSessionEvents } from '../lib/scannerSession';
 import { ScanLine, Camera, CameraOff, Check, X, Search, FlaskConical, Smartphone, Loader2, Copy } from 'lucide-react';
 
@@ -34,22 +34,16 @@ const BLANK_FORM: ScannerFormData = {
   existingProduct: null,
 };
 
-const READER_ID = 'reader';
-
 interface ScannerTabProps {
   products: Product[];
   onConfirm: (data: ScannerFormData) => void;
 }
 
 export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
-  const [scanning, setScanning] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
   const [manualInput, setManualInput] = useState('');
   const [formData, setFormData] = useState<ScannerFormData | null>(null);
-  const scannerRef = useRef<Html5Qrcode | null>(null);
   const manualInputRef = useRef<HTMLInputElement>(null);
   const qtyInputRef = useRef<HTMLInputElement>(null);
-  const initializedRef = useRef(false);
 
   // Mobile remote scanner state
   const [mobileModalOpen, setMobileModalOpen] = useState(false);
@@ -58,141 +52,13 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
   const [copied, setCopied] = useState(false);
   const sessionChannelRef = useRef<any>(null);
 
-  // Keep manual input focused when no form is open
+  const productsRef = useRef(products);
   useEffect(() => {
-    if (!formData && manualInputRef.current && !scanning) {
-      manualInputRef.current.focus();
-    }
-  }, [formData, scanning]);
+    productsRef.current = products;
+  }, [products]);
 
-  // Cleanup camera on unmount — safe, never throws
-  useEffect(() => {
-    return () => {
-      if (scannerRef.current) {
-        const instance = scannerRef.current;
-        scannerRef.current = null;
-        instance
-          .stop()
-          .then(() => instance.clear())
-          .catch(() => {
-            try {
-              instance.clear();
-            } catch {
-              // fully ignore — component is gone
-            }
-          });
-      }
-      // Clean up mobile session channel + session
-      if (sessionChannelRef.current) {
-        sessionChannelRef.current.unsubscribe();
-        sessionChannelRef.current = null;
-      }
-      if (sessionIdRef.current) {
-        void deleteSession(sessionIdRef.current);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const stopCamera = useCallback(async () => {
-    if (!scannerRef.current) {
-      setScanning(false);
-      return;
-    }
-    const instance = scannerRef.current;
-    scannerRef.current = null;
-    setScanning(false);
-    try {
-      const state = instance.getState();
-      // 2 === SCANNING
-      if (state === 2) {
-        await instance.stop();
-      }
-      instance.clear();
-    } catch {
-      try {
-        instance.clear();
-      } catch {
-        // ignore
-      }
-    }
-  }, []);
-
-  const handleScanResult = useCallback(
-    (decodedText: string) => {
-      const code = decodedText.trim();
-      if (!code) return;
-      void stopCamera();
-      processScannedCode(code);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [products, stopCamera]
-  );
-
-  const startCamera = useCallback(async () => {
-    // Stop any existing instance before starting a new one
-    await stopCamera();
-    setCameraError(null);
-
-    // Ensure the DOM node exists
-    const el = document.getElementById(READER_ID);
-    if (!el) {
-      setCameraError('Scanner container not found. Please reload the page.');
-      return;
-    }
-
-    // Avoid double-initialization on the same element id
-    if (initializedRef.current) {
-      setCameraError('Scanner is already initializing. Please wait or stop the camera first.');
-      return;
-    }
-
-    try {
-      const html5Qrcode = new Html5Qrcode(READER_ID, { verbose: false });
-      scannerRef.current = html5Qrcode;
-      initializedRef.current = true;
-
-      // Prefer the back camera; fall back to any available camera.
-      const config = {
-        fps: 10,
-        qrbox: { width: 280, height: 200 },
-        aspectRatio: 1.4,
-      };
-
-      try {
-        await html5Qrcode.start(
-          { facingMode: { ideal: 'environment' } },
-          config,
-          (decodedText) => handleScanResult(decodedText),
-          () => {
-            // per-frame decode failure — ignore
-          }
-        );
-      } catch {
-        // Fallback: try the default (user/webcam) camera
-        await html5Qrcode.start(
-          { facingMode: { ideal: 'user' } },
-          config,
-          (decodedText) => handleScanResult(decodedText),
-          () => {
-            // ignore
-          }
-        );
-      }
-
-      setScanning(true);
-    } catch (err: any) {
-      initializedRef.current = false;
-      scannerRef.current = null;
-      setScanning(false);
-      setCameraError(
-        'Camera permission denied or camera not found. You can still use the barcode gun or type manually.'
-      );
-    }
-  }, [handleScanResult, stopCamera]);
-
-  const processScannedCode = (code: string) => {
-    const existing = products.find((p) => p.sku_id.toLowerCase() === code.toLowerCase());
+  const processScannedCode = useCallback((code: string) => {
+    const existing = productsRef.current.find((p) => p.sku_id.toLowerCase() === code.toLowerCase());
     if (existing) {
       setFormData({
         sku_id: existing.sku_id,
@@ -208,13 +74,38 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
         existingProduct: existing,
       });
     } else {
-      setFormData({
-        ...BLANK_FORM,
-        sku_id: code,
-      });
+      setFormData({ ...BLANK_FORM, sku_id: code });
     }
     setManualInput('');
-  };
+  }, []);
+
+  const { scanning, cameraError, startCamera, stopCamera, scannerContainerRef } = useScanner(processScannedCode);
+
+  // Keep manual input focused when no form is open
+  useEffect(() => {
+    if (!formData && manualInputRef.current && !scanning) {
+      manualInputRef.current.focus();
+    }
+  }, [formData, scanning]);
+
+  // Keep a ref of sessionId for unmount cleanup
+  const sessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  // Cleanup mobile session on unmount
+  useEffect(() => {
+    return () => {
+      if (sessionChannelRef.current) {
+        sessionChannelRef.current.unsubscribe();
+        sessionChannelRef.current = null;
+      }
+      if (sessionIdRef.current) {
+        void deleteSession(sessionIdRef.current);
+      }
+    };
+  }, []);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -224,30 +115,21 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
   };
 
   const handleTestScan = () => {
-    // Simulate a barcode scan with a sample SKU so the review workflow can be tested
-    const sampleCode = 'TEST-SCAN-001';
-    processScannedCode(sampleCode);
+    processScannedCode('TEST-SCAN-001');
   };
-
-  // Keep a ref of sessionId so the unmount cleanup always sees the latest value
-  const sessionIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-  }, [sessionId]);
 
   // --- Mobile Remote Scanner ---
   const handleConnectMobile = async () => {
     const id = generateSessionId();
     const ok = await createSession(id);
     if (!ok) {
-      setCameraError('Failed to create scanner session. Please try again.');
+      setConnectionStatus('idle');
       return;
     }
     setSessionId(id);
     setConnectionStatus('waiting');
     setMobileModalOpen(true);
 
-    // Subscribe to session status changes (mobile connects)
     const statusChannel = supabase
       .channel(`scan_session_${id}`)
       .on(
@@ -263,7 +145,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
       )
       .subscribe();
 
-    // Subscribe to new scan events from the mobile device
     const eventChannel = supabase
       .channel(`scan_events_${id}`)
       .on(
@@ -408,22 +289,25 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
             )}
           </div>
         </div>
+        {/* Isolated scanner container — React renders NO children here.
+            html5-qrcode injects its own DOM inside the ref'd div, and the
+            hook removes that div on cleanup so React never tries to
+            reconcile foreign nodes (fixes removeChild crash). */}
         <div
-          id={READER_ID}
+          ref={scannerContainerRef}
           style={{ width: '100%', height: '300px' }}
           className="rounded-lg overflow-hidden bg-slate-900 flex items-center justify-center"
-        >
-          {!scanning && (
-            <div className="text-center text-slate-400 py-12">
-              <ScanLine size={48} className="mx-auto mb-2 opacity-30" />
-              <p className="text-sm">Click "Start Camera" to scan with your device camera</p>
-            </div>
-          )}
-        </div>
+        />
         {cameraError && (
           <div className="mt-3 p-3 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-800 flex items-start gap-2">
             <CameraOff size={18} className="shrink-0 mt-0.5 text-amber-600" />
             <span>{cameraError}</span>
+          </div>
+        )}
+        {!scanning && !cameraError && (
+          <div className="mt-3 text-center text-sm text-slate-400 flex items-center justify-center gap-1.5">
+            <ScanLine size={16} />
+            Click "Start Camera" to scan with your device camera
           </div>
         )}
       </div>
