@@ -64,18 +64,18 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
         const rawJson = code.replace('AI_LABEL_SCAN:', '');
         const data = JSON.parse(rawJson);
 
-        const sku = data.sku_id || '';
-        const existing = productsRef.current.find((p) => p.sku_id.toLowerCase() === sku.toLowerCase());
+        const sku = (data.sku_id || '').trim();
+        const existing = sku ? productsRef.current.find((p) => p.sku_id.toLowerCase() === sku.toLowerCase()) : null;
 
         if (existing) {
           setFormData({
             sku_id: existing.sku_id,
-            part_name: existing.part_name,
+            part_name: data.part_name || existing.part_name,
             category: existing.category || 'General',
-            vehicle_model: '',
+            vehicle_model: data.vehicle_model || '',
             qty: data.quantity || 1,
             cost_price: existing.cost_price || (data.mrp ? Math.round(data.mrp * 0.7) : 0),
-            selling_price: existing.selling_price || data.mrp || 0,
+            selling_price: data.mrp || existing.selling_price || 0,
             gst_rate: existing.gst_rate || 18,
             rack_location: existing.rack_location || '',
             isExisting: true,
@@ -86,6 +86,7 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
             ...BLANK_FORM,
             sku_id: data.sku_id || '',
             part_name: data.part_name || '',
+            vehicle_model: data.vehicle_model || '',
             selling_price: data.mrp || 0,
             cost_price: data.mrp ? Math.round(data.mrp * 0.7) : 0,
             qty: data.quantity || 1,
@@ -306,7 +307,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
             <button
               onClick={handleTestScan}
               className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 text-sm font-medium"
-              title="Simulate a scan to test the review workflow"
             >
               <FlaskConical size={16} /> Test Scan Example
             </button>
@@ -338,12 +338,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
             <span>{cameraError}</span>
           </div>
         )}
-        {!scanning && !cameraError && (
-          <div className="mt-3 text-center text-sm text-slate-400 flex items-center justify-center gap-1.5">
-            <ScanLine size={16} />
-            Click "Start Camera" to scan with your device camera
-          </div>
-        )}
       </div>
 
       {/* Mobile pairing modal */}
@@ -363,9 +357,7 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
             </p>
 
             <div className={`flex items-center justify-center gap-2 py-2 px-4 rounded-lg mb-4 text-sm font-medium ${
-              connectionStatus === 'connected'
-                ? 'bg-emerald-100 text-emerald-700'
-                : 'bg-amber-100 text-amber-700'
+              connectionStatus === 'connected' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
             }`}>
               {connectionStatus === 'connected' ? (
                 <>
@@ -402,12 +394,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               {copied ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
               {copied ? 'Link Copied!' : 'Copy Scanner Link'}
             </button>
-
-            {connectionStatus === 'connected' && (
-              <p className="text-xs text-center text-slate-400">
-                Scan products or labels on your phone — data will fill here automatically.
-              </p>
-            )}
           </div>
         </div>
       )}
@@ -420,11 +406,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               <Sparkles size={18} className="text-emerald-600" />
               {formData.isExisting ? 'Existing Product — Review & Add Stock' : 'Product Details (Auto-Filled)'}
             </h3>
-            {formData.isExisting && (
-              <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
-                Current Stock: {formData.existingProduct?.available_qty ?? 0}
-              </span>
-            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -447,21 +428,21 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">Category</label>
-              <input
-                type="text"
-                value={formData.category}
-                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-300 rounded focus:ring-2 focus:ring-emerald-500"
-              />
-            </div>
-            <div>
               <label className="block text-sm font-medium text-slate-600 mb-1">Vehicle Model</label>
               <input
                 type="text"
                 value={formData.vehicle_model}
                 onChange={(e) => setFormData({ ...formData, vehicle_model: e.target.value })}
                 placeholder="e.g. Maruti Swift, Honda City…"
+                className="w-full px-3 py-2 border border-slate-300 rounded focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-600 mb-1">Category</label>
+              <input
+                type="text"
+                value={formData.category}
+                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
                 className="w-full px-3 py-2 border border-slate-300 rounded focus:ring-2 focus:ring-emerald-500"
               />
             </div>
@@ -478,11 +459,13 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">Rack Location</label>
+              <label className="block text-sm font-medium text-slate-600 mb-1">Selling Price (MRP)</label>
               <input
-                type="text"
-                value={formData.rack_location}
-                onChange={(e) => setFormData({ ...formData, rack_location: e.target.value })}
+                type="number"
+                min="0"
+                step="0.01"
+                value={formData.selling_price}
+                onChange={(e) => setFormData({ ...formData, selling_price: parseFloat(e.target.value) || 0 })}
                 className="w-full px-3 py-2 border border-slate-300 rounded focus:ring-2 focus:ring-emerald-500"
               />
             </div>
@@ -498,30 +481,13 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">Selling Price (MRP)</label>
+              <label className="block text-sm font-medium text-slate-600 mb-1">Rack Location</label>
               <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={formData.selling_price}
-                onChange={(e) => setFormData({ ...formData, selling_price: parseFloat(e.target.value) || 0 })}
+                type="text"
+                value={formData.rack_location}
+                onChange={(e) => setFormData({ ...formData, rack_location: e.target.value })}
                 className="w-full px-3 py-2 border border-slate-300 rounded focus:ring-2 focus:ring-emerald-500"
               />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">GST Rate (%)</label>
-              <select
-                value={formData.gst_rate}
-                onChange={(e) => setFormData({ ...formData, gst_rate: parseFloat(e.target.value) })}
-                className="w-full px-3 py-2 border border-slate-300 rounded focus:ring-2 focus:ring-emerald-500 bg-white"
-              >
-                <option value={0}>0%</option>
-                <option value={4}>4%</option>
-                <option value={9}>9%</option>
-                <option value={12}>12%</option>
-                <option value={18}>18%</option>
-                <option value={28}>28%</option>
-              </select>
             </div>
           </div>
 
@@ -535,7 +501,7 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
             <button
               onClick={handleConfirm}
               disabled={!formData.sku_id || !formData.part_name || formData.qty < 1}
-              className="flex items-center gap-1 px-5 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-1 px-5 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 font-medium disabled:opacity-50"
             >
               <Check size={16} /> Confirm & Add Stock
             </button>
