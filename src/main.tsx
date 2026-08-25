@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import MobileScanner from './components/MobileScanner.tsx';
+import ErrorBoundary from './components/ErrorBoundary.tsx';
 import './index.css';
 
 function getRoute() {
@@ -19,7 +20,9 @@ const root = createRoot(document.getElementById('root')!);
 if (route.type === 'mobile-scanner') {
   root.render(
     <StrictMode>
-      <MobileScanner sessionId={route.sessionId} />
+      <ErrorBoundary>
+        <MobileScanner sessionId={route.sessionId} />
+      </ErrorBoundary>
     </StrictMode>
   );
 } else {

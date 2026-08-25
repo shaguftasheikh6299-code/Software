@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
 import { supabase } from '../lib/supabase';
 import { connectSession, disconnectSession, sendScanEvent } from '../lib/scannerSession';
-import { ScanLine, Check, X, Camera, CameraOff, Wifi, ArrowLeft } from 'lucide-react';
+import { ScanLine, Check, X, Camera, CameraOff, Wifi, ArrowLeft, AlertTriangle, Loader2, Keyboard } from 'lucide-react';
 
 const READER_ID = 'mobile-reader';
 
@@ -13,24 +12,57 @@ interface Props {
 export default function MobileScanner({ sessionId }: Props) {
   const [scanning, setScanning] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const [recentScans, setRecentScans] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
-  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const [connecting, setConnecting] = useState(true);
+  const [manualInput, setManualInput] = useState('');
+  const [mounted, setMounted] = useState(false);
+  const scannerRef = useRef<any>(null);
   const initializedRef = useRef(false);
   const lastScanRef = useRef<{ code: string; time: number }>({ code: '', time: 0 });
+  const manualInputRef = useRef<HTMLInputElement>(null);
 
-  // Connect the session on mount, disconnect on unmount
+  // Mark component as mounted so we know the DOM is ready
   useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Connect the session on mount — safe try/catch, never crashes
+  useEffect(() => {
+    if (!sessionId) {
+      setSessionError('No session ID provided in the URL.');
+      setConnecting(false);
+      return;
+    }
+
+    let cancelled = false;
+
     (async () => {
-      const ok = await connectSession(sessionId);
-      setConnected(ok);
+      try {
+        const ok = await connectSession(sessionId);
+        if (cancelled) return;
+        if (ok) {
+          setConnected(true);
+        } else {
+          setSessionError('Failed to connect to desktop session. The session may have expired — please rescan the QR code on the desktop.');
+        }
+      } catch {
+        if (cancelled) return;
+        setSessionError('Unable to reach the server. Check your internet connection and try again.');
+      } finally {
+        if (!cancelled) setConnecting(false);
+      }
     })();
 
     return () => {
-      disconnectSession(sessionId);
-      stopCamera();
+      cancelled = true;
+      try {
+        void disconnectSession(sessionId);
+      } catch {
+        // ignore
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   const stopCamera = useCallback(async () => {
@@ -61,17 +93,17 @@ export default function MobileScanner({ sessionId }: Props) {
       const code = decodedText.trim();
       if (!code) return;
 
-      // Dedupe rapid re-scans of the same code within 2 seconds
       const now = Date.now();
       if (code === lastScanRef.current.code && now - lastScanRef.current.time < 2000) {
         return;
       }
       lastScanRef.current = { code, time: now };
 
-      // Haptic + audio feedback
+      // Haptic feedback
       if (navigator.vibrate) {
-        navigator.vibrate(200);
+        try { navigator.vibrate(200); } catch { /* ignore */ }
       }
+      // Audio beep
       try {
         const beepCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
         const osc = beepCtx.createOscillator();
@@ -88,23 +120,45 @@ export default function MobileScanner({ sessionId }: Props) {
         // audio not critical
       }
 
-      // Send to desktop via Supabase
-      await sendScanEvent(sessionId, code);
-      setRecentScans((prev) => [code, ...prev].slice(0, 5));
+      // Send to desktop
+      try {
+        await sendScanEvent(sessionId, code);
+        setRecentScans((prev) => [code, ...prev].slice(0, 5));
+      } catch {
+        // Still show in recent even if send fails
+        setRecentScans((prev) => [code, ...prev].slice(0, 5));
+      }
     },
     [sessionId]
   );
 
+  // Camera start — only called after mount, fully wrapped in try/catch
   const startCamera = useCallback(async () => {
+    if (!mounted) return;
     await stopCamera();
     setCameraError(null);
 
     const el = document.getElementById(READER_ID);
     if (!el) {
-      setCameraError('Scanner container not found.');
+      setCameraError('Scanner container not ready yet. Tap "Start Camera" to retry.');
       return;
     }
     if (initializedRef.current) return;
+
+    // Dynamically import html5-qrcode so a load failure doesn't crash the page
+    let Html5QrcodeModule: any;
+    try {
+      Html5QrcodeModule = await import('html5-qrcode');
+    } catch {
+      setCameraError('Scanner library failed to load. You can still type barcodes manually below.');
+      return;
+    }
+
+    const Html5Qrcode = Html5QrcodeModule.Html5Qrcode || Html5QrcodeModule.default;
+    if (!Html5Qrcode) {
+      setCameraError('Scanner library unavailable. Use manual input below.');
+      return;
+    }
 
     try {
       const html5Qrcode = new Html5Qrcode(READER_ID, { verbose: false });
@@ -121,14 +175,15 @@ export default function MobileScanner({ sessionId }: Props) {
         await html5Qrcode.start(
           { facingMode: { ideal: 'environment' } },
           config,
-          (decodedText) => { void handleScanResult(decodedText); },
+          (decodedText: string) => { void handleScanResult(decodedText); },
           () => {}
         );
       } catch {
+        // Fallback to user-facing camera
         await html5Qrcode.start(
           { facingMode: { ideal: 'user' } },
           config,
-          (decodedText) => { void handleScanResult(decodedText); },
+          (decodedText: string) => { void handleScanResult(decodedText); },
           () => {}
         );
       }
@@ -137,52 +192,141 @@ export default function MobileScanner({ sessionId }: Props) {
       initializedRef.current = false;
       scannerRef.current = null;
       setScanning(false);
-      setCameraError('Camera permission denied or camera not found. Please allow camera access in your browser settings.');
+      setCameraError('Camera permission denied or camera not found. You can still type barcodes manually below.');
     }
-  }, [handleScanResult, stopCamera]);
+  }, [handleScanResult, stopCamera, mounted]);
 
-  // Auto-start camera on mount
+  // Auto-start camera after mount with a small delay to ensure DOM is ready
   useEffect(() => {
+    if (!mounted) return;
     const timer = setTimeout(() => {
       void startCamera();
-    }, 500);
+    }, 800);
     return () => clearTimeout(timer);
-  }, [startCamera]);
+  }, [startCamera, mounted]);
+
+  // Cleanup camera on unmount
+  useEffect(() => {
+    return () => {
+      if (scannerRef.current) {
+        const instance = scannerRef.current;
+        scannerRef.current = null;
+        instance
+          .stop()
+          .then(() => instance.clear())
+          .catch(() => {
+            try { instance.clear(); } catch { /* ignore */ }
+          });
+      }
+    };
+  }, []);
+
+  const handleManualSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const code = manualInput.trim();
+    if (!code) return;
+    void handleScanResult(code);
+    setManualInput('');
+    setTimeout(() => manualInputRef.current?.focus(), 50);
+  };
+
+  const goHome = () => {
+    void stopCamera();
+    window.location.href = '/';
+  };
 
   return (
     <div className="min-h-screen bg-slate-900 text-white flex flex-col">
-      {/* Header */}
+      {/* Header — always visible immediately */}
       <div className="bg-slate-800 px-4 py-3 flex items-center gap-3 shrink-0">
         <button
-          onClick={() => { void stopCamera(); window.location.href = '/'; }}
+          onClick={goHome}
           className="p-2 -ml-2 text-slate-300 hover:text-white"
+          aria-label="Go back"
         >
           <ArrowLeft size={22} />
         </button>
         <div className="flex-1">
           <h1 className="text-base font-semibold flex items-center gap-2">
             <ScanLine size={20} className="text-emerald-400" />
-            Mobile Scanner
+            Remote Scanner Active
           </h1>
-          <p className="text-xs text-slate-400">Session: {sessionId}</p>
+          <p className="text-xs text-slate-400">Session: {sessionId || '—'}</p>
         </div>
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-slate-700 text-xs">
-          <Wifi size={14} className={connected ? 'text-emerald-400' : 'text-slate-500'} />
-          {connected ? <span className="text-emerald-400">Connected</span> : <span className="text-slate-400">Connecting…</span>}
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-slate-700 text-xs shrink-0">
+          {connecting ? (
+            <>
+              <Loader2 size={14} className="text-amber-400 animate-spin" />
+              <span className="text-amber-400">Connecting…</span>
+            </>
+          ) : connected ? (
+            <>
+              <Wifi size={14} className="text-emerald-400" />
+              <span className="text-emerald-400">Connected</span>
+            </>
+          ) : (
+            <>
+              <X size={14} className="text-red-400" />
+              <span className="text-red-400">Offline</span>
+            </>
+          )}
         </div>
+      </div>
+
+      {/* Session error banner */}
+      {sessionError && (
+        <div className="px-4 py-3 bg-red-900/60 border-b border-red-700 flex items-start gap-2 shrink-0">
+          <AlertTriangle size={18} className="shrink-0 mt-0.5 text-red-400" />
+          <div>
+            <p className="text-sm text-red-200 font-medium">Connection Error</p>
+            <p className="text-xs text-red-300 mt-0.5">{sessionError}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Manual barcode input — visible immediately */}
+      <div className="px-4 py-3 bg-slate-800/50 border-b border-slate-700 shrink-0">
+        <label className="block text-xs font-medium text-slate-400 mb-1 flex items-center gap-1">
+          <Keyboard size={14} /> Manual Barcode Input
+        </label>
+        <form onSubmit={handleManualSubmit} className="flex gap-2">
+          <input
+            ref={manualInputRef}
+            type="text"
+            placeholder="Type or scan barcode, press Enter…"
+            value={manualInput}
+            onChange={(e) => setManualInput(e.target.value)}
+            className="flex-1 px-3 py-2.5 bg-slate-900 border border-slate-600 rounded-lg text-white font-mono text-sm focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none"
+          />
+          <button
+            type="submit"
+            className="px-4 py-2.5 bg-emerald-600 text-white rounded-lg font-medium text-sm shrink-0"
+          >
+            Send
+          </button>
+        </form>
       </div>
 
       {/* Camera area */}
       <div className="flex-1 flex flex-col items-center justify-center p-4">
         <div
           id={READER_ID}
-          style={{ width: '100%', maxWidth: '400px', height: '300px' }}
+          style={{ width: '100%', maxWidth: '400px', height: '300px', minHeight: '300px' }}
           className="rounded-xl overflow-hidden bg-black flex items-center justify-center border border-slate-700"
         >
           {!scanning && !cameraError && (
             <div className="text-center text-slate-500">
-              <ScanLine size={48} className="mx-auto mb-2 opacity-50" />
-              <p className="text-sm">Starting camera…</p>
+              {mounted ? (
+                <>
+                  <Loader2 size={36} className="mx-auto mb-2 animate-spin text-emerald-500" />
+                  <p className="text-sm">Starting camera…</p>
+                </>
+              ) : (
+                <>
+                  <ScanLine size={48} className="mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">Loading scanner…</p>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -197,12 +341,12 @@ export default function MobileScanner({ sessionId }: Props) {
         {scanning && (
           <div className="mt-3 flex items-center gap-2 text-sm text-emerald-400 animate-pulse">
             <div className="w-2 h-2 rounded-full bg-emerald-400" />
-            Scanning… Point at a barcode
+            Scanning — point at a barcode
           </div>
         )}
       </div>
 
-      {/* Controls */}
+      {/* Camera controls */}
       <div className="px-4 pb-3 shrink-0 flex gap-2">
         {scanning ? (
           <button
