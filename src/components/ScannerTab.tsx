@@ -4,7 +4,7 @@ import type { Product } from '../types';
 import { supabase } from '../lib/supabase';
 import { useScanner } from '../lib/useScanner';
 import { generateSessionId, createSession, deleteSession, markScanReceived, deleteSessionEvents } from '../lib/scannerSession';
-import { ScanLine, Camera, CameraOff, Check, X, Search, FlaskConical, Smartphone, Loader2, Copy } from 'lucide-react';
+import { ScanLine, Camera, CameraOff, Check, X, Search, FlaskConical, Smartphone, Loader2, Copy, Sparkles } from 'lucide-react';
 
 interface ScannerFormData {
   sku_id: string;
@@ -58,6 +58,48 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
   }, [products]);
 
   const processScannedCode = useCallback((code: string) => {
+    // 1. AI OCR Label Data Handler
+    if (code.startsWith('AI_LABEL_SCAN:')) {
+      try {
+        const rawJson = code.replace('AI_LABEL_SCAN:', '');
+        const data = JSON.parse(rawJson);
+
+        const sku = data.sku_id || '';
+        const existing = productsRef.current.find((p) => p.sku_id.toLowerCase() === sku.toLowerCase());
+
+        if (existing) {
+          setFormData({
+            sku_id: existing.sku_id,
+            part_name: existing.part_name,
+            category: existing.category || 'General',
+            vehicle_model: '',
+            qty: data.quantity || 1,
+            cost_price: existing.cost_price || (data.mrp ? Math.round(data.mrp * 0.7) : 0),
+            selling_price: existing.selling_price || data.mrp || 0,
+            gst_rate: existing.gst_rate || 18,
+            rack_location: existing.rack_location || '',
+            isExisting: true,
+            existingProduct: existing,
+          });
+        } else {
+          setFormData({
+            ...BLANK_FORM,
+            sku_id: data.sku_id || '',
+            part_name: data.part_name || '',
+            selling_price: data.mrp || 0,
+            cost_price: data.mrp ? Math.round(data.mrp * 0.7) : 0,
+            qty: data.quantity || 1,
+            isExisting: false,
+          });
+        }
+        setManualInput('');
+        return;
+      } catch (err) {
+        console.error('Failed to parse AI OCR scanned JSON', err);
+      }
+    }
+
+    // 2. Standard Barcode / QR Code Handler
     const existing = productsRef.current.find((p) => p.sku_id.toLowerCase() === code.toLowerCase());
     if (existing) {
       setFormData({
@@ -81,20 +123,17 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
 
   const { scanning, cameraError, startCamera, stopCamera, scannerContainerRef } = useScanner(processScannedCode);
 
-  // Keep manual input focused when no form is open
   useEffect(() => {
     if (!formData && manualInputRef.current && !scanning) {
       manualInputRef.current.focus();
     }
   }, [formData, scanning]);
 
-  // Keep a ref of sessionId for unmount cleanup
   const sessionIdRef = useRef<string | null>(null);
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
-  // Cleanup mobile session on unmount
   useEffect(() => {
     return () => {
       if (sessionChannelRef.current) {
@@ -118,7 +157,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
     processScannedCode('TEST-SCAN-001');
   };
 
-  // --- Mobile Remote Scanner ---
   const handleConnectMobile = async () => {
     const id = generateSessionId();
     const ok = await createSession(id);
@@ -212,7 +250,7 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
 
   return (
     <div className="max-w-3xl mx-auto">
-      {/* Scanner input bar — always visible */}
+      {/* Scanner input bar */}
       <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4 mb-4">
         <label className="block text-sm font-medium text-slate-600 mb-1">
           Barcode / QR Scanner Input
@@ -236,7 +274,7 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
         </form>
       </div>
 
-      {/* Mobile Remote Scanner */}
+      {/* Mobile Remote Scanner Card */}
       <div className="bg-gradient-to-br from-emerald-50 to-blue-50 rounded-lg shadow-sm border border-emerald-200 p-4 mb-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -244,8 +282,8 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               <Smartphone size={20} className="text-white" />
             </div>
             <div>
-              <h3 className="font-semibold text-sm text-slate-800">Mobile Remote Scanner</h3>
-              <p className="text-xs text-slate-500">Turn your phone into a wireless barcode scanner</p>
+              <h3 className="font-semibold text-sm text-slate-800">Mobile Remote Scanner & AI OCR</h3>
+              <p className="text-xs text-slate-500">Scan barcodes or use AI camera to auto-fill label details</p>
             </div>
           </div>
           <button
@@ -289,10 +327,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
             )}
           </div>
         </div>
-        {/* Isolated scanner container — React renders NO children here.
-            html5-qrcode injects its own DOM inside the ref'd div, and the
-            hook removes that div on cleanup so React never tries to
-            reconcile foreign nodes (fixes removeChild crash). */}
         <div
           ref={scannerContainerRef}
           style={{ width: '100%', height: '300px' }}
@@ -328,7 +362,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               Scan this QR code with your phone camera to open the mobile scanner
             </p>
 
-            {/* Connection status */}
             <div className={`flex items-center justify-center gap-2 py-2 px-4 rounded-lg mb-4 text-sm font-medium ${
               connectionStatus === 'connected'
                 ? 'bg-emerald-100 text-emerald-700'
@@ -347,7 +380,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               )}
             </div>
 
-            {/* QR code */}
             <div className="flex justify-center mb-4">
               <div className="p-4 bg-white border-2 border-slate-200 rounded-xl">
                 <QRCodeCanvas
@@ -359,7 +391,6 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               </div>
             </div>
 
-            {/* Session ID + copy link */}
             <div className="text-center mb-3">
               <p className="text-xs text-slate-400 mb-1">Session ID</p>
               <p className="font-mono text-lg font-bold tracking-wider text-slate-700">{sessionId}</p>
@@ -374,7 +405,7 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
 
             {connectionStatus === 'connected' && (
               <p className="text-xs text-center text-slate-400">
-                Scan products on your phone — they will appear here instantly for review.
+                Scan products or labels on your phone — data will fill here automatically.
               </p>
             )}
           </div>
@@ -386,8 +417,8 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
         <div className="bg-white rounded-lg shadow-lg border-2 border-emerald-300 p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-semibold flex items-center gap-2">
-              <Search size={18} className="text-emerald-600" />
-              {formData.isExisting ? 'Existing Product — Review & Add Stock' : 'New Product — Enter Details'}
+              <Sparkles size={18} className="text-emerald-600" />
+              {formData.isExisting ? 'Existing Product — Review & Add Stock' : 'Product Details (Auto-Filled)'}
             </h3>
             {formData.isExisting && (
               <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
@@ -467,7 +498,7 @@ export default function ScannerTab({ products, onConfirm }: ScannerTabProps) {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">Selling Price</label>
+              <label className="block text-sm font-medium text-slate-600 mb-1">Selling Price (MRP)</label>
               <input
                 type="number"
                 min="0"
